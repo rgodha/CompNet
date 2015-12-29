@@ -3,28 +3,25 @@
 #include<stdlib.h> 
 #include<arpa/inet.h>
 #include<sys/socket.h>
+#include<sys/types.h>
 #include<unistd.h>
 #include<sys/time.h>
  
-#define BUFLEN 50000  //Max length of buffer
+#define BUFLEN 50100  //Max length of buffer
 #define MSG_HEADER_LEN 24
 #define PORT 8888   //The port on which to listen for incoming data
-#define MAX_PACKET_SIZE 500024
+#define MAX_PACKET_SIZE 50100
 
-struct header {
+struct __attribute__((packed)) header {
     char packet_type;
     uint32_t seq_num;
     uint32_t packet_len;
-    char *payload;
 };
 
 void dump_packet(struct header *pkt) 
 {
-    /*if(pkt->packet_type == 'E') {
-        printf("\nSummary Report: ");
-    }*/
-    printf("\nPkt_Type %c  Sequence Number: %d Packet Len %d Payload:",
-           pkt->packet_type, ntohl(pkt->seq_num), ntohl(pkt->packet_len));
+    printf("\nPkt_Type %c  Sequence Number: %d Packet Len %d ",
+           pkt->packet_type, ntohl(pkt->seq_num), ntohl(pkt->packet_len) );
 }
 
 float timedifference_msec(struct timeval t0, struct timeval t1)
@@ -61,18 +58,19 @@ int main(int argc, char *argv[])
     struct sockaddr_in si_me, si_other;
     int s, i, slen = sizeof(si_other) , recv_len;
     //char buf[BUFLEN];
-    //char packet[MSG_HEADER_LEN];
-    char packet[MAX_PACKET_SIZE];
+    char *packet;
+    char *payload;
+    //char packet[MAX_PACKET_SIZE] = "\0";
     int exp_payload_size = 0, recv_payload_size = 0;
     int seqNo = 0;
     int c, sPort = 0, sEcho = 0;
     int packet_count=0, bytes_count=0, duration = 0;
     int global_packet_count = 0, global_bytes_count = 0;
-    //char payload[MAX_PACKET_SIZE] = {'\0'};
-    //char *payload_ptr;
     struct timeval stop_time, server_start_time, start_time, current_time;
     struct timeval timeout;      
-    timeout.tv_sec = 5;  /* A 5 sec timeout */
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0;  /* A 5 sec timeout */
+    int close_flag = 0;
     
     //Get the Command Line Arguments
     while((c = getopt(argc, argv, "p:c:")) != -1) {
@@ -111,12 +109,13 @@ int main(int argc, char *argv[])
         printf("Error: Could not bind socket");
         die("bind");
     }
-    
     if (setsockopt (s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout,
                         sizeof(timeout)) < 0) {
         die("setsockopt failed");
     }
 
+    packet = (char *)malloc(MAX_PACKET_SIZE);
+    
     //keep listening for data
     while(1)
     {
@@ -129,16 +128,17 @@ int main(int argc, char *argv[])
             printf("Blastee Start Time %lu:%lu (sec). \n",(server_start_time.tv_sec)%100, server_start_time.tv_usec/1000);
         }
 
-        //try to receive some data, this is a blocking call
         // Clear the buffer.
-        memset(packet, 0, sizeof(MAX_PACKET_SIZE));
+        memset(packet, 0, MAX_PACKET_SIZE);
 
-        /* Recv the packet */
+        /* Recv the packet: this is blocking call */
         if ((recv_len = recvfrom(s, packet, MAX_PACKET_SIZE, 0, (struct sockaddr *)&si_other, &slen)) == -1)
         {
             printf("\nFinal Summary: ");
             print_summary(server_start_time, global_packet_count, global_bytes_count);
-            die("recvfrom()");
+            //die("recvfrom()");
+            printf("No packet received in 5 sec. TIMEOUT !\n");
+            exit(1);
         }
          
         /* Get the current time for this packet */
@@ -154,19 +154,25 @@ int main(int argc, char *argv[])
             start_time = current_time;  /* On Recving 1st paket start start time. */
             printf("1st Interaction: Start Time %lu:%lu (sec). \n",(start_time.tv_sec)%100, start_time.tv_usec/1000);
         }
-        
-        struct header* pkt;
-        pkt = malloc(sizeof(struct header));
-        pkt->payload = malloc(sizeof(recv_len));
-        
-        pkt = (struct header *)packet;
-        pkt->payload = ((struct header *)packet)->payload;
+       
+        struct header* pkt = (struct header *)packet;
+        payload = packet + sizeof(struct header);
+        exp_payload_size = ntohl(pkt->packet_len);
         
         dump_packet(pkt);
+                if(exp_payload_size == 0) {
+                    printf("No Payload Received. ");
+                } else if(exp_payload_size == 1) {
+                    printf("Payload: %02x ",payload[0]);
+                } else if(exp_payload_size == 2) {
+                    printf("Payload: %02x%02x ",payload[0],payload[1]);
+                } else if(exp_payload_size == 3) {
+                    printf("Payload: %02x%02x%02x ",payload[0],payload[1],payload[2]);
+                } else {
+                    printf("Payload: %02x%02x%02x%02x ",payload[0], payload[1],payload[2],payload[3]);
+                }
 
-        //Crash here
-        //printf("Data %s ",*(pkt->payload));
-       
+
         if(pkt->packet_type == 'D') {
             exp_payload_size = ntohl(pkt->packet_len);
             seqNo = ntohl(pkt->seq_num);
@@ -174,7 +180,6 @@ int main(int argc, char *argv[])
             printf("\nReceived packet from %s:%d of Size:%d (Bytes) seq no: %d  at time:%lu:%lu(sec) with Payload Size: %d \n",
                 inet_ntoa(si_other.sin_addr), ntohs(si_other.sin_port), recv_len, seqNo, (current_time.tv_sec)%100, current_time.tv_usec/1000, exp_payload_size);
        
-            //printf(" Data: %s\n",packet);
         }
         
         if(pkt->packet_type == 'E') {
@@ -184,17 +189,25 @@ int main(int argc, char *argv[])
             /* Reinitailze the values */ 
             packet_count = 0;
             bytes_count = 0;
+            close_flag = 1;
         }
  
-        /*now reply the client with the same data
-        if (sendto(s, buf, recv_len, 0, (struct sockaddr*) &si_other, slen) == -1)
-        {
-            die("sendto()");
+        /* now reply/echo the client with the exact data and packet with C type */
+        if(sEcho == 1) {
+            pkt->packet_type = 'C';
+            printf("\nEcho Back:");
+            dump_packet(pkt);
+            if (sendto(s, pkt, recv_len, MSG_DONTWAIT, (struct sockaddr*) &si_other, slen) == -1)
+            {
+                die("sendto()");
+            }
         }
-            */
-        //free(pkt->payload);
-        //free(pkt);
-
+        
+        if(close_flag == 1) {
+            printf("\nRecv'd End Msg. Close the connection.\n");
+            close(s);
+            return 0;
+        }
     }
  
     close(s);
