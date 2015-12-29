@@ -6,17 +6,18 @@
 #include<arpa/inet.h>
 #include<sys/socket.h>
 #include<time.h>
+#include<fcntl.h>
+#include <netdb.h>
  
 //#define SERVER "127.0.0.1"
-//#define BUFLEN 512  //Max length of buffer
+#define BUFLEN 50100  //Max length of buffer
 //#define PORT 8888   //The port on which to send data
-#define MAX_PACKET_SIZE 50000
+#define MAX_PACKET_SIZE 50100
 
-struct header {
+struct __attribute__((packed)) header {
     char packet_type;
     uint32_t seq_num;
     uint32_t packet_len;
-    char *payload;
 };
 
 void die(char *s)
@@ -25,10 +26,10 @@ void die(char *s)
     exit(1);
 }
 
-void dump_packet(struct header *pkt) {
-    
-    printf("\nPkt_Type %c  Sequence Number: %d Packet Len %d Payload: %s",
-           pkt->packet_type, ntohl(pkt->seq_num), ntohl(pkt->packet_len), pkt->payload);
+void dump_packet(struct header *pkt)
+{    
+    printf("\nPkt_Type %c  Sequence Number: %d Packet Len %d  ",
+           pkt->packet_type, ntohl(pkt->seq_num), ntohl(pkt->packet_len));
 }
 
 int main(int argc, char *argv[])
@@ -37,17 +38,27 @@ int main(int argc, char *argv[])
     int s, i, slen=sizeof(si_other);
     int c=0, hport=0, hrate=0, hnumpkts=0, hseq=0, hlen=0, hc=0;
     char *hostname = NULL;
-    //char buf[BUFLEN] = "\0" ;
-    int packet_size = 0, Hlen = 0;
+    char buf[BUFLEN] = "\0" ;
+    int packet_size = 0, Hlen = 0, rv, recv_len;
     char ch = 'A';
     useconds_t usec;
-    char *fillPayload;
+    char *packet, *payload;
+    int exp_payload_size = 0;
+    struct hostent * he;
+    struct in_addr **addr_list;
     
     /* Get the Command line Arguments */
     while( (c = getopt(argc, argv, "s:p:r:n:q:l:c:")) != -1) {
         switch(c) {
             case 's':
-                hostname = optarg;
+                //hostname = optarg;
+                if ((he = gethostbyname(optarg)) == NULL ) {  // get the host info
+                    herror("gethostbyname");
+                    return 2;
+                }   
+
+                // print information about this host:
+                //printf("Official name is: %s\n", he->h_name); 
                 break;
             case 'p':
                 hport = atoi(optarg);
@@ -78,6 +89,12 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Expected less arguments\n");
         exit(1);
     }
+    
+    addr_list = (struct in_addr **)he->h_addr_list;
+    for(i = 0; addr_list[i] != NULL; i++) {
+        //printf("%s ", inet_ntoa(*addr_list[i]));
+        hostname = inet_ntoa(*addr_list[i]);
+    }
 
     // Print the values
     printf("Hostname %s Port %d Rate %d Num of Pkts %d Seq Num: %d Payload Length: %d Echo %d\n",hostname, 
@@ -88,8 +105,8 @@ int main(int argc, char *argv[])
         printf("Error: Given Port Number is Wrong.\n");
         exit(1);
     }
-    if(hlen >= 50) {
-        printf("Error: Payload more than 50 KB\n");
+    if(hlen >= 50000) {
+        printf("Error: Payload more than 49999 B\n");
         exit(1);
     }
 
@@ -105,7 +122,7 @@ int main(int argc, char *argv[])
     {
         die("socket");
     }
- 
+
     memset((char *) &si_other, 0, sizeof(si_other));
     si_other.sin_family = AF_INET;
     si_other.sin_port = htons(hport);
@@ -117,57 +134,75 @@ int main(int argc, char *argv[])
     }
  
     Hlen = hlen;    // For saving the payload length.
+    
+    packet = malloc(MAX_PACKET_SIZE);
+
     while(hnumpkts > 0)
     {
         /* Generate Packet */
-        struct header *pkt = (struct header *) malloc(sizeof(struct header));
-        
+        memset(packet, 0, MAX_PACKET_SIZE); 
+        struct header *pkt = (struct header*) packet;
+
         /* Fill the packet header */
         pkt->packet_type = 'D';
         pkt->seq_num = htonl(hseq);
         pkt->packet_len = htonl(hlen);
-        //pkt->seq_num = hseq;
-        //pkt->packet_len = hlen;
 
-        pkt->payload = malloc(sizeof(hlen));
-        fillPayload = pkt->payload;
-    
-        /* Fill the payload with length hlen as given in argument */
-        while(hlen > 0) {
-            *fillPayload = ch;
-            //printf("%c ",*fillPayload);
-            ch++; fillPayload++;
-            hlen--;
-        }
+        payload = packet + sizeof(struct header);
 
         packet_size = sizeof(struct header) + Hlen;
-        //printf("Packet Size is %d + %ld \n ",packet_size, sizeof(struct header));
 
         /* Print the packet */
         dump_packet(pkt);
-    
+                if(Hlen == 0) {
+                    printf("No Payload. ");
+                } else if(Hlen == 1) {
+                    printf("Payload: %02x ",payload[0]);
+                } else if(Hlen == 2) {
+                    printf("Payload: %02x%02x ",payload[0],payload[1]);
+                } else if(Hlen == 3) {
+                    printf("Payload: %02x%02x%02x ",payload[0],payload[1],payload[2]);
+                } else {
+                    printf("Payload: %02x%02x%02x%02x ",payload[0], payload[1],payload[2],payload[3]);
+                } 
+
+
         //send the message
-        if (sendto(s, pkt, packet_size, 0 ,(struct sockaddr *)&si_other, slen) != -1) {
+        if (sendto(s, packet, packet_size, 0 ,(struct sockaddr *)&si_other, slen) != -1) {
             printf("\nWaiting for %d millisec...",usec/1000);
             usleep(usec);
         } else {
             printf("Error: In Send Packet");
             die("sendto()");
         }
-        
-        /*
-        //receive a reply and print it
-        //clear the buffer by filling null, it might have previously received data
+
         memset(buf,'\0', BUFLEN);
         //try to receive some data, this is a blocking call
-        if (recvfrom(s, buf, BUFLEN, 0, (struct sockaddr *) &si_other, &slen) == -1)
+        if(hc == 1) {
+        if (recvfrom(s, buf, BUFLEN, MSG_DONTWAIT, (struct sockaddr *) &si_other, &slen) != -1) 
         {
-            die("recvfrom()");
-        }
-         
-        puts(buf);
-        */
+                struct header *pkt;
+    
+                pkt = (struct header *)buf;
+                payload = buf + sizeof(struct header);
+                if(pkt->packet_type == 'C')
+                    printf("\nECHO: ");
 
+                exp_payload_size = ntohl(pkt->packet_len);
+                dump_packet(pkt);
+                if(exp_payload_size == 0) {
+                    printf("No Payload Received. ");
+                } else if(exp_payload_size == 1) {
+                    printf("Payload: %02x ",payload[0]);
+                } else if(exp_payload_size == 2) {
+                    printf("Payload: %02x%02x ",payload[0],payload[1]);
+                } else if(exp_payload_size == 3) {
+                    printf("Payload: %02x%02x%02x ",payload[0],payload[1],payload[2]);
+                } else {
+                    printf("Payload: %02x%02x%02x%02x ",payload[0], payload[1],payload[2],payload[3]);
+                } 
+        }
+        }
         /* Reinitialize variable */
         hlen = Hlen;
         hseq += hlen; 
@@ -180,7 +215,7 @@ int main(int argc, char *argv[])
             pkt->seq_num = htonl(hseq);
             packet_size = (int)(sizeof(struct header));
             pkt->packet_len = htonl(0);
-            pkt->payload = NULL;
+            //pkt->payload = NULL;
         
             /* Print the packet */
             dump_packet(pkt);
@@ -190,10 +225,10 @@ int main(int argc, char *argv[])
                 die("sendto()");
             }
         }
-        //free(pkt->payload);
-        free(pkt);
-        
+        //free(pkt);
+       
     }
+       
     printf("\n\n"); 
     close(s);
     return 0;
